@@ -1,0 +1,100 @@
+name: "🎉 GoReleaser Publish"
+
+# Reusable workflow: publishes the GoReleaser release for the tag that started
+# the caller and, in the same run, pushes the Docker images declared under
+# dockers_v2 in the caller's .goreleaser.y(a)ml, tagged with that release.
+#
+# The images contain the released binaries only if the caller's Dockerfile
+# copies them (COPY $TARGETPLATFORM/<binary>). A Dockerfile that runs
+# `go install ...@latest` instead ships whatever the module proxy serves.
+#
+# Start the caller from a tag: a tag push, or a manual run with a tag selected
+# as the ref. The job fails on any other ref, because
+# projectdiscovery/actions/goreleaser passes --skip=validate, which turns off
+# GoReleaser's own check that HEAD is the tagged commit.
+#
+# Usage:
+#
+#   on:
+#     push:
+#       tags:
+#         - 'v*'
+#     workflow_dispatch:
+#
+#   jobs:
+#     release:
+#       uses: projectdiscovery/workflows/.github/workflows/goreleaser-publish.yaml@v1
+#       permissions:
+#         contents: write
+#       secrets:
+#         docker-username: ${{ secrets.DOCKER_USERNAME }}
+#         docker-token: ${{ secrets.DOCKER_TOKEN }}
+#         slack-webhook: ${{ secrets.RELEASE_SLACK_WEBHOOK }}
+#         discord-webhook-id: ${{ secrets.DISCORD_WEBHOOK_ID }}
+#         discord-webhook-token: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: 'Runner label for the release job'
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      token:
+        description: 'GitHub token GoReleaser uses to publish the release (defaults to GITHUB_TOKEN)'
+        required: false
+      docker-username:
+        description: 'Docker Hub username that pushes the images'
+        required: true
+      docker-token:
+        description: 'Docker Hub access token for docker-username'
+        required: true
+      slack-webhook:
+        description: 'Slack webhook URL for announce.slack in the GoReleaser config'
+        required: false
+      discord-webhook-id:
+        description: 'Discord webhook ID for announce.discord in the GoReleaser config'
+        required: false
+      discord-webhook-token:
+        description: 'Discord webhook token for announce.discord in the GoReleaser config'
+        required: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: write # create the GitHub release and upload its assets
+    steps:
+      - name: Require a tag ref
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::Start this workflow from a tag; got ${GITHUB_REF}."
+          exit 1
+
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: projectdiscovery/actions/setup/go@v1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.docker-username }}
+          password: ${{ secrets.docker-token }}
+
+      - name: Publish release and images
+        uses: projectdiscovery/actions/goreleaser@v1
+        with:
+          release: 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.token || github.token }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          SLACK_WEBHOOK: ${{ secrets.slack-webhook }}
+          DISCORD_WEBHOOK_ID: ${{ secrets.discord-webhook-id }}
+          DISCORD_WEBHOOK_TOKEN: ${{ secrets.discord-webhook-token }}
