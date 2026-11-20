@@ -1,0 +1,92 @@
+name: "🔖 Auto Release"
+
+# Reusable workflow: tags and releases the caller's default branch when its
+# files differ from the latest v* tag. Empty commits and changes under
+# .github/ do not count.
+#
+# svu picks the next version: a breaking change bumps the major version, a
+# feat commit bumps the minor version, and anything else bumps the patch.
+#
+# Usage:
+#
+#   on:
+#     schedule:
+#       - cron: '0 0 * * 0'
+#     workflow_dispatch:
+#
+#   jobs:
+#     release:
+#       uses: projectdiscovery/workflows/.github/workflows/auto-release.yaml@v1
+#       permissions:
+#         contents: write
+#
+# GITHUB_TOKEN creates the tag and release, so neither starts other
+# workflows (such as one on push: tags). To build after a release, add a job
+# with `needs: release` and `if: needs.release.outputs.tag != ''`.
+
+on:
+  workflow_call:
+    outputs:
+      tag:
+        description: 'The tag this run created, or empty when it released nothing'
+        value: ${{ jobs.release.outputs.tag }}
+
+jobs:
+  release:
+    name: Release
+    # Release only from the default branch. A scheduled run always starts on
+    # it, and GitHub documents no event payload for it to compare against.
+    if: github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # A queued run then sees the tag the previous run created and skips it,
+    # instead of computing the same version and failing to create it.
+    concurrency:
+      group: auto-release
+    outputs:
+      tag: ${{ steps.svu.outputs.tag }}
+    steps:
+      # The gate and svu need every tag and the history behind them. A
+      # shallow clone has no tags, which is why goconfig never released.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compare files with the latest tag
+        id: gate
+        run: |
+          # Select the tag the way svu does, so the gate and the next
+          # version start from the same release.
+          last_tag="$(git -c versionsort.suffix=- for-each-ref --count=1 --sort=-version:refname --format='%(refname:strip=2)' 'refs/tags/v*')"
+          if [ -z "$last_tag" ]; then
+            echo "::error::No v* tag found. Create the first release by hand, for example: gh release create v0.0.1 --generate-notes"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$last_tag" HEAD; then
+            echo "::error::$last_tag is not on this branch, so a release here would leave out its changes. Merge it into this branch first."
+            exit 1
+          fi
+          changed="$(git diff --name-only "$last_tag" HEAD -- . ':(exclude).github')"
+          if [ -z "$changed" ]; then
+            echo "::notice::No file changes since $last_tag; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and release
+        id: svu
+        if: steps.gate.outputs.release == 'true'
+        uses: projectdiscovery/actions/svu-next@v1
+        with:
+          # Bump the patch when no commit is a feat or fix (for example, only
+          # chore(deps) commits). Otherwise svu finds no new version and,
+          # with set-failed, the job fails.
+          always: 'true'
+          tag-pattern: 'v*'
+          release-create: 'true'
+          # svu-next only warns on errors by default, which would make a
+          # failed release look like a successful run.
+          set-failed: 'true'
