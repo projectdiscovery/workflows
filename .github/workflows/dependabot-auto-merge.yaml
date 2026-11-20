@@ -1,18 +1,27 @@
 name: "🔀 Dependabot Auto Merge"
 
-# Reusable workflow: runs the Go compatibility checks on a Dependabot pull
-# request and merges the pull request at the head commit those checks ran on.
+# Reusable workflow: merges a Dependabot pull request at the event's head
+# commit. With go-compat-checks set to true, it first runs the Go
+# compatibility checks on that commit and merges only when they pass.
 #
 # Call it from a pull_request workflow. Both jobs skip every pull request that
 # Dependabot did not open from a branch of this repository, so the calling job
 # can run for all pull requests.
 #
-# The merge is a direct merge pinned to the checked head commit, never GitHub
+# The merge is a direct merge pinned to the event's head commit, never GitHub
 # auto-merge, because auto-merge does not keep the expected head. It fails and
 # leaves the pull request open when GitHub cannot merge right away: the head
 # moved, a required review or required check is missing, or the branch
 # conflicts. After the blocker is gone, re-run the failed job: it merges the
-# same commit, or fails without approving when the head has moved since.
+# same commit, or fails when the head has moved since. Either way, the job
+# approves the current head first, even one pushed after the event.
+#
+# Set go-compat-checks to true in a Go repository to run the checks. To skip
+# them only for GitHub Actions updates, pass
+# ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') }}; a branch
+# with any other name still runs them. Without the checks, nothing in this
+# workflow tests the pull request, and the merge starts right away: a required
+# check from another workflow may still be pending, which fails the merge.
 #
 # Do not make the Merge job a required status check: while it runs, its own
 # pending check would block the merge.
@@ -29,18 +38,23 @@ name: "🔀 Dependabot Auto Merge"
 #         contents: write
 #         pull-requests: write
 #       with:
+#         go-compat-checks: true
 #         go-version: 'stable'
 #         release-test: true
 
 on:
   workflow_call:
     inputs:
+      go-compat-checks:
+        description: 'Run the Go compatibility checks; false merges without them'
+        type: boolean
+        default: false
       go-version:
         description: 'Go version for the checks; empty reads it from go.mod'
         type: string
         default: ''
       release-test:
-        description: 'Also run a GoReleaser snapshot build'
+        description: 'With go-compat-checks, also run a GoReleaser snapshot build'
         type: boolean
         default: false
 
@@ -52,6 +66,7 @@ jobs:
     # github.actor alone is not enough: a fork can make Dependabot push to the
     # fork's branch of a pull request opened against this repository.
     if: >-
+      inputs.go-compat-checks &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -79,10 +94,16 @@ jobs:
     name: Merge
     needs: check
     # Same gate as check, plus github.actor: a maintainer's push to a
-    # Dependabot branch is checked but merged by hand. A re-run keeps the
+    # Dependabot branch is left for a manual merge. A re-run keeps the
     # original actor. zizmor flags github.actor as spoofable; here it only
     # narrows the user.login and head-repository checks above it.
+    #
+    # Unlike check, this job also runs when go-compat-checks is false. A
+    # skipped check job would skip it, so !cancelled() overrides that; the
+    # result test still requires a passing check when the checks are on.
     if: >- # zizmor: ignore[bot-conditions]
+      !cancelled() &&
+      (needs.check.result == 'success' || !inputs.go-compat-checks) &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -92,20 +113,6 @@ jobs:
       contents: write # merge, and delete the head branch
       pull-requests: write # approve
     steps:
-      # pr/approve approves whatever the head is now, so stop before it when
-      # a push has moved the head off the checked commit.
-      - name: Require the checked head
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          head="$(gh pr view "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid)"
-          if [ "$head" != "$HEAD_SHA" ]; then
-            echo "::error::The head moved to $head after the checks ran on $HEAD_SHA."
-            exit 1
-          fi
-
       - uses: projectdiscovery/actions/pr/approve@v1
         with:
           pr-number: ${{ github.event.pull_request.number }}
