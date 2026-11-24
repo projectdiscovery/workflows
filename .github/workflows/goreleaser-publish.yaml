@@ -1,17 +1,20 @@
 name: "🎉 GoReleaser Publish"
 
-# Reusable workflow: publishes the GoReleaser release for the tag that started
-# the caller and, in the same run, pushes the Docker images declared under
-# dockers_v2 in the caller's .goreleaser.y(a)ml, tagged with that release.
+# Reusable workflow: publishes the GoReleaser release for a tag and, in the
+# same run, pushes the Docker images declared under dockers_v2 in the caller's
+# .goreleaser.y(a)ml, tagged with that release.
 #
 # The images contain the released binaries only if the caller's Dockerfile
 # copies them (COPY $TARGETPLATFORM/<binary>). A Dockerfile that runs
 # `go install ...@latest` instead ships whatever the module proxy serves.
 #
-# Start the caller from a tag: a tag push, or a manual run with a tag selected
-# as the ref. The job fails on any other ref, because
-# projectdiscovery/actions/goreleaser passes --skip=validate, which turns off
-# GoReleaser's own check that HEAD is the tagged commit.
+# Start the caller from a tag (a tag push, or a manual run with a tag selected
+# as the ref), or pass an existing tag as the tag input to publish it from any
+# other ref. The tag input wins when both are present. The job checks out the
+# tag, so HEAD is the tagged commit. It fails when it has neither a tag ref nor
+# the tag input, because projectdiscovery/actions/goreleaser passes
+# --skip=validate, which turns off GoReleaser's own check that HEAD is the
+# tagged commit.
 #
 # Usage:
 #
@@ -32,6 +35,28 @@ name: "🎉 GoReleaser Publish"
 #         slack-webhook: ${{ secrets.RELEASE_SLACK_WEBHOOK }}
 #         discord-webhook-id: ${{ secrets.DISCORD_WEBHOOK_ID }}
 #         discord-webhook-token: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
+#
+# To publish the tag that auto-release creates, run this workflow in a job
+# after it. GoReleaser uploads to the release auto-release created and keeps
+# its notes, because release.mode defaults to keep-existing.
+#
+#   jobs:
+#     release:
+#       uses: projectdiscovery/workflows/.github/workflows/auto-release.yaml@v1
+#       permissions:
+#         contents: write
+#
+#     publish:
+#       needs: release
+#       if: needs.release.outputs.tag != ''
+#       uses: projectdiscovery/workflows/.github/workflows/goreleaser-publish.yaml@v1
+#       permissions:
+#         contents: write
+#       with:
+#         tag: ${{ needs.release.outputs.tag }}
+#       secrets:
+#         docker-username: ${{ secrets.DOCKER_USERNAME }}
+#         docker-token: ${{ secrets.DOCKER_TOKEN }}
 
 on:
   workflow_call:
@@ -40,6 +65,10 @@ on:
         description: 'Runner label for the release job'
         type: string
         default: 'ubuntu-latest'
+      tag:
+        description: 'Existing tag to publish, for callers that do not start from a tag ref, such as a job after auto-release'
+        type: string
+        default: ''
     secrets:
       token:
         description: 'GitHub token GoReleaser uses to publish the release (defaults to GITHUB_TOKEN)'
@@ -67,15 +96,19 @@ jobs:
     permissions:
       contents: write # create the GitHub release and upload its assets
     steps:
-      - name: Require a tag ref
-        if: github.ref_type != 'tag'
+      - name: Require a tag
+        if: github.ref_type != 'tag' && inputs.tag == ''
         run: |
-          echo "::error::Start this workflow from a tag; got ${GITHUB_REF}."
+          echo "::error::Start this workflow from a tag or set the tag input; got ${GITHUB_REF}."
           exit 1
 
       - name: Check out the tagged commit
         uses: actions/checkout@v7
         with:
+          # With refs/tags/, a branch name or SHA in the tag input fails the
+          # checkout instead of being published. An empty ref checks out the
+          # ref that started the caller.
+          ref: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || '' }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -94,7 +127,7 @@ jobs:
           release: 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.token || github.token }}
-          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
           SLACK_WEBHOOK: ${{ secrets.slack-webhook }}
           DISCORD_WEBHOOK_ID: ${{ secrets.discord-webhook-id }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.discord-webhook-token }}
