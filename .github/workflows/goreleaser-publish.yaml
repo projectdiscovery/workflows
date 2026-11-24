@@ -2,7 +2,10 @@ name: "🎉 GoReleaser Publish"
 
 # Reusable workflow: publishes the GoReleaser release for a tag and, in the
 # same run, pushes the Docker images declared under dockers_v2 in the caller's
-# .goreleaser.y(a)ml, tagged with that release.
+# .goreleaser.y(a)ml, tagged with that release. Pushing them needs
+# docker-username and docker-token; without them the run fails before it
+# uploads anything to the GitHub release. A repo that builds no images leaves
+# both secrets out.
 #
 # The images contain the released binaries only if the caller's Dockerfile
 # copies them (COPY $TARGETPLATFORM/<binary>). A Dockerfile that runs
@@ -30,6 +33,7 @@ name: "🎉 GoReleaser Publish"
 #       permissions:
 #         contents: write
 #       secrets:
+#         # Leave out both Docker secrets when the repo builds no images.
 #         docker-username: ${{ secrets.DOCKER_USERNAME }}
 #         docker-token: ${{ secrets.DOCKER_TOKEN }}
 #         slack-webhook: ${{ secrets.RELEASE_SLACK_WEBHOOK }}
@@ -55,6 +59,7 @@ name: "🎉 GoReleaser Publish"
 #       with:
 #         tag: ${{ needs.release.outputs.tag }}
 #       secrets:
+#         # Leave out both Docker secrets when the repo builds no images.
 #         docker-username: ${{ secrets.DOCKER_USERNAME }}
 #         docker-token: ${{ secrets.DOCKER_TOKEN }}
 
@@ -74,11 +79,11 @@ on:
         description: 'GitHub token GoReleaser uses to publish the release (defaults to GITHUB_TOKEN)'
         required: false
       docker-username:
-        description: 'Docker Hub username that pushes the images'
-        required: true
+        description: 'Docker Hub username that pushes the images (the Docker Hub login is skipped when neither Docker secret is set)'
+        required: false
       docker-token:
-        description: 'Docker Hub access token for docker-username'
-        required: true
+        description: 'Docker Hub access token for docker-username (the login fails when only one of the two is set)'
+        required: false
       slack-webhook:
         description: 'Slack webhook URL for announce.slack in the GoReleaser config'
         required: false
@@ -95,6 +100,12 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: write # create the GitHub release and upload its assets
+    # A step's if: can't read secrets, so this flag carries whether either
+    # Docker secret is set without putting their values in the environment of
+    # every step. With only one of them set, the login runs and fails instead
+    # of being skipped.
+    env:
+      DOCKER_LOGIN: ${{ secrets.docker-username != '' || secrets.docker-token != '' }}
     steps:
       - name: Require a tag
         if: github.ref_type != 'tag' && inputs.tag == ''
@@ -116,6 +127,7 @@ jobs:
         uses: projectdiscovery/actions/setup/go@v1
 
       - name: Log in to Docker Hub
+        if: env.DOCKER_LOGIN == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.docker-username }}
