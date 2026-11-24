@@ -6,6 +6,8 @@ name: "🔖 Auto Release"
 #
 # svu picks the next version: a breaking change bumps the major version, a
 # feat commit bumps the minor version, and anything else bumps the patch.
+# With `v0: true`, a breaking change bumps the minor version instead while
+# the major version is 0, so the repo stays on v0.x.
 #
 # Usage:
 #
@@ -26,6 +28,11 @@ name: "🔖 Auto Release"
 
 on:
   workflow_call:
+    inputs:
+      v0:
+        description: 'prevent major version increments if current version is still v0'
+        type: boolean
+        default: false
     outputs:
       tag:
         description: 'The tag this run created, or empty when it released nothing'
@@ -86,6 +93,7 @@ jobs:
           # with set-failed, the job fails.
           always: 'true'
           tag-pattern: 'v*'
+          v0: ${{ inputs.v0 }}
           release-create: 'true'
           # svu-next only warns on errors by default, which would make a
           # failed release look like a successful run.
